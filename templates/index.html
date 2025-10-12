@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Assistant</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <h2><i class="fas fa-database"></i> Data Assistant</h2>
+            <nav class="nav-tabs">
+                <button class="nav-tab active" data-tab="data-generation">
+                    <i class="fas fa-cogs"></i> Data Generation
+                </button>
+                <button class="nav-tab" data-tab="talk-to-data">
+                    <i class="fas fa-comments"></i> Talk to your data
+                </button>
+            </nav>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Data Generation Tab -->
+            <div id="data-generation" class="tab-content active">
+                <div class="content-section">
+                    <h3>Prompt</h3>
+                    <textarea id="prompt-text" placeholder="Enter your prompt here..." rows="4"></textarea>
+
+                    <div class="upload-section">
+                        <label for="schema-upload" class="upload-btn">
+                            <i class="fas fa-upload"></i> Upload DDL Schema
+                        </label>
+                        <input type="file" id="schema-upload" accept=".sql,.json,.ddl" style="display: none;">
+                        <span class="file-info">Supported formats: SQL, JSON</span>
+                        <div id="upload-status" class="upload-status"></div>
+                    </div>
+
+                    <div class="advanced-params">
+                        <h4>Advanced Parameters</h4>
+                        <div class="param-row">
+                            <div class="param-group">
+                                <label for="temperature">Temperature</label>
+                                <input type="range" id="temperature" min="0" max="1" step="0.1" value="0.7">
+                                <span id="temp-value">0.7</span>
+                            </div>
+                            <div class="param-group">
+                                <label for="max-tokens">Max Tokens</label>
+                                <input type="number" id="max-tokens" value="100" min="10" max="10000">
+                            </div>
+                        </div>
+                    </div>
+
+                    <button id="generate-btn" class="generate-btn" disabled>
+                        <i class="fas fa-magic"></i> Generate
+                    </button>
+                </div>
+
+                <!-- Data Preview Section -->
+                <div class="data-preview-section" id="data-preview" style="display: none;">
+                    <div class="preview-header">
+                        <h3>Data Preview</h3>
+                        <select id="table-selector">
+                            <option value="">Select a table...</option>
+                        </select>
+                        <button id="download-btn" class="download-btn">
+                            <i class="fas fa-download"></i> Download CSV/ZIP
+                        </button>
+                    </div>
+
+                    <div id="table-container">
+                        <div class="table-wrapper">
+                            <table id="data-table">
+                                <thead></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="edit-section">
+                        <textarea id="edit-instructions" placeholder="Enter quick edit instructions..." rows="2"></textarea>
+                        <button id="submit-edit" class="submit-btn">
+                            <i class="fas fa-edit"></i> Submit
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Talk to Data Tab -->
+            <div id="talk-to-data" class="tab-content">
+                <div class="chat-interface">
+                    <h3>Talk to Your Data</h3>
+                    <div class="chat-messages" id="chat-messages">
+                        <div class="system-message">
+                            <i class="fas fa-robot"></i>
+                            <p>Hello! I can help you analyze your generated data. Ask me questions about your datasets!</p>
+                        </div>
+                    </div>
+                    <div class="chat-input-container">
+                        <input type="text" id="chat-input" placeholder="Ask a question about your data..." disabled>
+                        <button id="send-chat" disabled>
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                    <div class="chat-status">
+                        <p>Generate data first to start chatting!</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay" style="display: none;">
+        <div class="loading-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+            <p>Generating data...</p>
+        </div>
+    </div>
+
+    <!-- JavaScript -->
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

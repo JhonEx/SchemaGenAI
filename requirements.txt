@@ -1,0 +1,12 @@
+# Basic requirements for the Data Assistant application
+Flask==3.0.0
+pandas==2.1.4
+google-generativeai==0.3.2
+sqlparse==0.4.4
+Werkzeug==3.0.1
+python-dotenv==1.0.0
+
+# Optional dependencies (will work without these)
+# Uncomment if you want to use them:
+psycopg2-binary==2.9.9
+langfuse==2.6.3
