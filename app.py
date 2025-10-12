@@ -78,6 +78,71 @@ uploaded_schemas = {}
 chat_history = {}
 
 
+import google
+print(f"Checking Google GenAI version {google.generativeai.__version__}")
+
+def _coerce_text_from_response(resp) -> str:
+    # 1) Prefer .text if present
+    text = (getattr(resp, "text", "") or "").strip()
+    if text:
+        return text
+    # 2) Fallback to candidates parts
+    for c in getattr(resp, "candidates", []) or []:
+        content = getattr(c, "content", None)
+        if not content:
+            continue
+        parts = getattr(content, "parts", []) or []
+        joined = "".join(getattr(p, "text", "") for p in parts if getattr(p, "text", None)).strip()
+        if joined:
+            return joined
+    return ""  # nothing found
+
+
+def _strip_code_fences_loose(text: str) -> str:
+    # Remove a starting fence line even if no closing fence was produced
+    # e.g., "```json\n{...}" -> "{...}"
+    text = re.sub(r'^\s*```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    # If there is a trailing fence, drop it (and any trailing text after it)
+    text = re.sub(r'\s*```[\s\S]*$', '', text)
+    return text.strip()
+
+
+
+def _safe_json_from_response(resp) -> str:
+    text = (getattr(resp, "text", "") or "").strip()
+    if not text:
+        for c in getattr(resp, "candidates", []) or []:
+            parts = getattr(c, "content", {}).get("parts", [])
+            if parts:
+                text = "".join(getattr(p, "text", "") for p in parts).strip()
+                if text:
+                    break
+    return text
+
+
+def _extract_first_json_block(text: str) -> str:
+    # Strip code fences if present
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if m:
+        return m.group(1).strip()
+
+    # Fallback: take first well-formed {...} or [...] block
+    start = min([p for p in (text.find("{"), text.find("[")) if p != -1] or [-1])
+    if start == -1:
+        return text  # no JSON-looking content
+
+    stack = []
+    for i, ch in enumerate(text[start:], start):
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack: break
+            stack.pop()
+            if not stack:
+                return text[start:i + 1]
+    return text  # best effort
+
+
 class DataGenerator:
     def __init__(self):
         try:
@@ -191,6 +256,8 @@ class DataGenerator:
             logger.error(f"❌ Error parsing CREATE TABLE statement: {e}")
             return None
 
+
+
     def _smart_split_columns(self, definition: str) -> List[str]:
         """Split column definitions by comma, respecting parentheses"""
         parts = []
@@ -265,10 +332,11 @@ class DataGenerator:
             logger.error(f"❌ Error parsing column definition '{col_def}': {e}")
             return None
 
+
+
     @observe(name="generate_synthetic_data")
     def generate_synthetic_data(self, schema_info: Dict, instructions: str = "", temperature: float = 0.7,
-                                num_rows: int = 100) -> Dict[str, List[Dict]]:
-        """Generate synthetic data using Gemini with optional Langfuse observability"""
+                                num_rows: int = 3) -> Dict[str, List[Dict]]:
         try:
             if LANGFUSE_AVAILABLE:
                 langfuse_context.update_current_trace(
@@ -300,17 +368,7 @@ class DataGenerator:
             13. Generate data in dependency order (parent tables before child tables)
             14. Make the data realistic and diverse for a library management system
 
-            Important: Return ONLY valid JSON without any markdown formatting, explanations, or code blocks.
-
-            Example structure:
-            {{
-                "Authors": [
-                    {{"author_id": 1, "first_name": "Jane", "last_name": "Austen", "birth_date": "1775-12-16", "nationality": "British"}},
-                    {{"author_id": 2, "first_name": "Mark", "last_name": "Twain", "birth_date": "1835-11-30", "nationality": "American"}}
-                ],
-                "Publishers": [...],
-                "Books": [...]
-            }}
+            Important: Respond with ONLY a single JSON object, no prose, no code fences, no explanations.
             """
 
             logger.info(f"🔄 Generating synthetic data for {len(schema_info)} tables...")
@@ -323,39 +381,44 @@ class DataGenerator:
                 )
             )
 
-            # Parse the JSON response
-            response_text = response.text.strip()
-            if response_text.startswith('```json'):
-                response_text = response_text[7:-3]
-            elif response_text.startswith('```'):
-                response_text = response_text[3:-3]
+            # ---- robust extraction & parsing ----
+            raw = _coerce_text_from_response(response)
 
-            data = json.loads(response_text)
+            print(f"checking response raw: {raw}")
 
+            candidates = (
+                raw,
+                _strip_code_fences_loose(raw),  # remove ```json ... ```
+                _extract_first_json_block(raw),  # grab first balanced {...} / [...]
+            )
+
+            print(f"checking response candidate : {candidates}")
+
+            last_err = None
+            for s in candidates:
+                try:
+                    data = json.loads(s)
+                    if isinstance(data, dict) and data:
+                        logger.info(f"✅ Parsed JSON with {len(data)} tables: {list(data.keys())[:5]}")
+                    else:
+                        logger.warning("⚠️ JSON parsed but empty or not an object")
+                    return data
+                except json.JSONDecodeError as e:
+                    last_err = e
+
+            # If all attempts fail, log & return {}
+            logger.error(f"❌ JSON parsing error: {last_err}")
+            logger.error(f"Raw response (first 500 chars): {raw[:500]}...")
             if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    output={"generated_tables": list(data.keys()),
-                            "total_rows": sum(len(table_data) for table_data in data.values())}
-                )
-
-            logger.info(f"✅ Generated data for {len(data)} tables")
-            return data
-
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON parsing error: {e}")
-            logger.error(f"Raw response: {response_text[:500]}...")
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    output={"error": f"JSON parsing error: {str(e)}"}
-                )
+                langfuse_context.update_current_trace(output={"error": f"JSON parsing error: {str(last_err)}"})
             return {}
+
         except Exception as e:
             logger.error(f"❌ Error generating data: {e}")
             if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    output={"error": str(e)}
-                )
+                langfuse_context.update_current_trace(output={"error": str(e)})
             return {}
+
 
     @observe(name="modify_table_data")
     def modify_data(self, table_name: str, data: List[Dict], instructions: str, temperature: float = 0.7) -> List[Dict]:
@@ -396,20 +459,21 @@ class DataGenerator:
                 )
             )
 
-            response_text = response.text.strip()
-            if response_text.startswith('```json'):
-                response_text = response_text[7:-3]
-            elif response_text.startswith('```'):
-                response_text = response_text[3:-3]
+            response_text = _safe_json_from_response(response)
 
-            modified_data = json.loads(response_text)
+            for candidate in (response_text,
+                              _strip_code_fences_loose(response_text),
+                              _extract_first_json_block(response_text)):
+                try:
+                    modified_data = json.loads(candidate)
+                    break
+                except json.JSONDecodeError:
+                    modified_data = None
 
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    output={"modified_rows": len(modified_data)}
-                )
+            if modified_data is None:
+                logger.error("❌ Could not parse JSON from model output")
+                return data  # fallback to original
 
-            logger.info(f"✅ Modified {len(modified_data)} rows for table '{table_name}'")
             return modified_data
 
         except Exception as e:
@@ -497,6 +561,22 @@ data_generator = DataGenerator()
 def index():
     return render_template('index.html')
 
+@app.route('/session_status')
+def session_status():
+    sid = session.get('session_id')
+    has_schema = bool(sid and sid in uploaded_schemas)
+    has_data = bool(sid and sid in generated_data and generated_data[sid].get('data'))
+    tables = list(generated_data[sid]['data'].keys()) if has_data else []
+
+    print("Checking status ")
+    return jsonify({
+        'success': True,
+        'has_schema': has_schema,
+        'has_data': has_data,
+        'tables': tables,
+    })
+
+
 
 @app.route('/upload_schema', methods=['POST'])
 def upload_schema():
@@ -537,6 +617,8 @@ def upload_schema():
 
 
 @app.route('/generate_data', methods=['POST'])
+# --- in your route ---
+
 def generate_data():
     try:
         data = request.json
@@ -548,45 +630,87 @@ def generate_data():
         schema_info = uploaded_schemas[session_id]['schema_info']
         instructions = data.get('instructions', '')
         temperature = float(data.get('temperature', 0.7))
-        num_rows = int(data.get('num_rows', 100))
+        #num_rows = int(data.get('num_rows', 10))
+        num_rows = 5
 
-        # Validate inputs
         if num_rows <= 0 or num_rows > 10000:
             return jsonify({'success': False, 'error': 'Number of rows must be between 1 and 10,000'})
 
         if temperature < 0 or temperature > 1:
             return jsonify({'success': False, 'error': 'Temperature must be between 0 and 1'})
 
+        print(f"schema info: {schema_info}")
+        print(f"Instructions: {instructions}")
+        print(f"temperature: {temperature}")
+        print(f"num rows: {num_rows}")
+
         # Generate synthetic data
         synthetic_data = data_generator.generate_synthetic_data(
-            schema_info, instructions, temperature, num_rows
+            schema_info=schema_info,
+            instructions=instructions,
+            temperature=temperature,
+            num_rows=num_rows
         )
 
         if not synthetic_data:
             return jsonify({'success': False, 'error': 'Failed to generate data. Please try again.'})
 
-        # Store generated data
+        # --- enforce exactly num_rows per table ---
+        synthetic_data, issues = enforce_row_counts(
+            synthetic_data, schema_info, num_rows
+        )
+
+        if issues.get("too_few"):
+            # Option A: fail fast (clear error to caller)
+            return jsonify({'success': False,
+                            'error': f"Some tables had fewer than {num_rows} rows: {issues['too_few']}"})
+            # Option B (alternative): attempt a single retry with a stricter prompt.
+            # synthetic_data_retry = data_generator.retry_fill_missing_rows(schema_info, synthetic_data, num_rows)
+            # synthetic_data, issues = enforce_row_counts(synthetic_data_retry, schema_info, num_rows)
+            # if issues.get("too_few"):
+            #     return jsonify({'success': False, 'error': f"Could not reach {num_rows} rows for: {issues['too_few']}"})
+
         generated_data[session_id] = {
             'data': synthetic_data,
             'schema_info': schema_info,
             'timestamp': datetime.now().isoformat()
         }
-
-        # Initialize chat history for this session
         chat_history[session_id] = []
 
         logger.info(f"✅ Data generated for session {session_id[:8]}...")
-
-        return jsonify({
-            'success': True,
-            'data': synthetic_data,
-            'tables': list(synthetic_data.keys())
-        })
+        return jsonify({'success': True, 'data': synthetic_data, 'tables': list(synthetic_data.keys())})
 
     except Exception as e:
         logger.error(f"❌ Error generating data: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
+
+def enforce_row_counts(data: Dict[str, list], schema_info: Dict, num_rows: int):
+    """
+    Ensures each table has exactly num_rows rows.
+    - If a table has > num_rows: truncate.
+    - If a table has < num_rows: record issue (caller can retry or error).
+    Returns (adjusted_data, issues_dict)
+    """
+    adjusted = {}
+    issues = {"too_many": [], "too_few": []}
+
+    for table, rows in (data or {}).items():
+        if not isinstance(rows, list):
+            adjusted[table] = []
+            issues["too_few"].append(f"{table} (not a list)")
+            continue
+
+        if len(rows) > num_rows:
+            adjusted[table] = rows[:num_rows]  # hard cap
+            issues["too_many"].append(f"{table} ({len(rows)} > {num_rows})")
+        elif len(rows) < num_rows:
+            adjusted[table] = rows
+            issues["too_few"].append(f"{table} ({len(rows)} < {num_rows})")
+        else:
+            adjusted[table] = rows
+
+    return adjusted, issues
 
 @app.route('/get_table_data/<table_name>')
 def get_table_data(table_name):
@@ -752,5 +876,4 @@ if __name__ == '__main__':
     print(f"   Langfuse: {'✅ Available' if LANGFUSE_AVAILABLE else '❌ Not available'}")
     print(f"   Gemini API: {'✅ Configured' if os.getenv('GOOGLE_API_KEY') else '❌ Not configured'}")
     print("   Server starting on http://localhost:5002")
-
-    app.run(debug=True, host='0.0.0.0', port=5002)
+    app.run(debug=True, host='0.0.0.0', port=5002, use_reloader=False)

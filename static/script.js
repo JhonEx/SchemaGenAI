@@ -115,9 +115,30 @@ function updateTemperatureDisplay() {
     }
 }
 
-function checkForExistingData() {
-    // This function can be used to restore session state if needed
-    console.log('🔍 Checking for existing data...');
+async function checkForExistingData() {
+  try {
+    const res = await fetch('/session_status');
+    const s = await res.json();
+    if (!s.success) return;
+
+    if (s.has_data) {
+      // hydrate globals the UI expects
+      currentTables = s.tables || [];
+      currentData.generatedData = currentData.generatedData || {};
+      // you can lazy-load rows per table later; for now just enable chat
+      enableChatInterface();
+      // populate the selector right away
+      populateTableSelector(currentTables);
+      // reveal the preview section
+      if (dataPreview) dataPreview.style.display = 'block';
+      showSuccessMessage(`Restored session. ${currentTables.length} tables ready.`);
+    } else if (s.has_schema) {
+      // schema uploaded earlier—make sure Generate button is enabled
+      if (generateBtn) generateBtn.disabled = false;
+    }
+  } catch (e) {
+    console.warn('session_status check failed', e);
+  }
 }
 
 async function handleSchemaUpload(event) {
@@ -203,7 +224,7 @@ async function generateData() {
 
     const instructions = promptText ? promptText.value.trim() : '';
     const temperature = temperatureSlider ? parseFloat(temperatureSlider.value) : 0.7;
-    const numRows = maxTokens ? parseInt(maxTokens.value) : 100;
+    const numRows = maxTokens ? parseInt(maxTokens.value) : 5;
 
     console.log('⚙️ Generation parameters:', { instructions, temperature, numRows });
 
