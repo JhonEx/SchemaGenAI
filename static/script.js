@@ -25,6 +25,10 @@ const chatInput = document.getElementById('chat-input');
 const sendChat = document.getElementById('send-chat');
 const chatMessages = document.getElementById('chat-messages');
 const chatStatus = document.querySelector('.chat-status');
+// In your existing success handler for /generate_data:
+document.getElementById('save-db-btn').disabled = false;
+
+
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function() {
@@ -33,6 +37,32 @@ document.addEventListener('DOMContentLoaded', function() {
     updateTemperatureDisplay();
     checkForExistingData();
 });
+
+document.getElementById('save-db-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('save-db-btn');
+  const status = document.getElementById('save-db-status');
+  status.style.display = 'block';
+  status.textContent = 'Saving data to database...';
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/save_data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const payload = await res.json();
+    if (!payload.success) throw new Error(payload.error || 'Failed to save data');
+
+    const saved = payload.saved || {};
+    const lines = Object.entries(saved).map(([t, n]) => `${t}: ${n} rows`);
+    status.textContent = `✅ Saved to DB:\n${lines.join('\n')}`;
+  } catch (err) {
+    status.textContent = `❌ ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 
 function initializeEventListeners() {
     console.log('📝 Setting up event listeners...');

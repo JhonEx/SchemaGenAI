@@ -2,12 +2,9 @@ from flask import Flask, render_template, request, jsonify, send_file, session
 import os
 import json
 import pandas as pd
-import sqlite3
-import tempfile
 import zipfile
 from io import StringIO, BytesIO
 import google.generativeai as genai
-from google.generativeai import configure
 import re
 import uuid
 from datetime import datetime
@@ -15,8 +12,20 @@ import sqlparse
 from werkzeug.utils import secure_filename
 import logging
 from typing import Dict, List, Any, Optional
+from config import get_config
+import psycopg2
+from psycopg2 import pool as pg_pool
+from psycopg2 import sql
+from psycopg2.extras import execute_values
+import os
+
 
 # Optional Langfuse import - will work without it
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 try:
     from langfuse import Langfuse
     from langfuse.decorators import observe, langfuse_context
@@ -44,11 +53,68 @@ except ImportError:
     langfuse_context = DummyContext()
 
 app = Flask(__name__)
+# Load config from your Base/Dev/Prod (the class you shared)
+
+app.config.from_object(get_config())
+
+pool = None
+_db_cfg = None
+
+def init_db_pool(app):
+    """Initialize database connection pool with graceful error handling"""
+    global pool, _db_cfg
+    _db_cfg = {
+        'host': app.config["DB_HOST"],
+        'port': app.config["DB_PORT"],
+        'database': app.config["DB_NAME"],
+        'user': app.config["DB_USER"],
+        'password': app.config["DB_PASSWORD"]
+    }
+    try:
+        pool = pg_pool.SimpleConnectionPool(minconn=1, maxconn=20, **_db_cfg)
+        logger.info("✅ PostgreSQL connection pool created successfully")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to create database connection pool: {e}")
+        logger.warning("Starting without database connection. Save-to-DB will be disabled.")
+        pool = None
+
+
+init_db_pool(app)
+
 app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-here')
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from contextlib import contextmanager
+
+@contextmanager
+def get_conn():
+    """Yield a pooled connection if available; otherwise raise a helpful error."""
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+    conn = pool.getconn()
+    try:
+        yield conn
+    finally:
+        pool.putconn(conn)
+
+def _bulk_insert_table(conn, table_name: str, rows: list[dict]):
+    """Bulk insert list of dict rows into a table using execute_values."""
+    if not rows:
+        return 0
+
+    # Use columns from the first row and preserve that order
+    columns = list(rows[0].keys())
+
+    # Build safe SQL: INSERT INTO "table" ("c1","c2",...) VALUES %s
+    q = sql.SQL("INSERT INTO {tbl} ({cols}) VALUES %s").format(
+        tbl=sql.Identifier(table_name),
+        cols=sql.SQL(", ").join(sql.Identifier(c) for c in columns)
+    )
+
+    values = [tuple(r.get(c) for c in columns) for r in rows]
+
+    with conn.cursor() as cur:
+        execute_values(cur, q.as_string(conn), values)  # server-side formatting
+    return len(values)
 
 # Configure Gemini API
 api_key = os.getenv('GOOGLE_API_KEY')
@@ -57,6 +123,277 @@ if not api_key:
     raise ValueError("Please set GOOGLE_API_KEY environment variable")
 
 genai.configure(api_key=api_key)
+
+print(f"Google Key GOOGLE_API_KEY = {api_key}")
+
+
+
+#Table DB Mappers
+
+# --- Type mappers ---
+
+def _pg_type_from_schema(col_type_raw: str) -> str:
+    """
+    Map a MySQL-like type string to a Postgres type.
+    Examples: INT, BIGINT, VARCHAR(100), DECIMAL(10,2), DATETIME, DATE, ENUM('a','b')
+    """
+    t = (col_type_raw or "").strip().upper()
+
+    # Basic sized types
+    if t.startswith("VARCHAR"):
+        return t.replace("VARCHAR", "VARCHAR")
+    if t.startswith("CHAR"):
+        return t.replace("CHAR", "CHAR")
+    if t.startswith("DECIMAL") or t.startswith("NUMERIC"):
+        return t  # Postgres supports DECIMAL/NUMERIC(p,s)
+    if t.startswith("INT(") or t == "INT" or t == "INTEGER":
+        return "INTEGER"
+    if t in ("TINYINT", "SMALLINT"):
+        return "SMALLINT"
+    if t in ("BIGINT",):
+        return "BIGINT"
+    if t in ("FLOAT",):
+        return "REAL"
+    if t in ("DOUBLE", "DOUBLE PRECISION"):
+        return "DOUBLE PRECISION"
+    if t in ("BOOL", "BOOLEAN", "TINYINT(1)"):
+        return "BOOLEAN"
+    if t in ("DATE",):
+        return "DATE"
+    if t in ("DATETIME", "TIMESTAMP"):
+        return "TIMESTAMP"
+    if t.startswith("ENUM("):
+        # We'll implement as TEXT with a CHECK constraint later (simpler than creating a type)
+        return "TEXT"
+
+    # Fallbacks
+    if t.startswith("TEXT") or t == "LONGTEXT" or t == "MEDIUMTEXT":
+        return "TEXT"
+    if t.startswith("BLOB"):
+        return "BYTEA"
+
+    # default
+    return "TEXT"
+
+
+from typing import Optional
+
+try:
+    # psycopg3
+    from psycopg import sql as psy_sql
+except Exception:
+    psy_sql = None
+
+def _default_sql_fragment(default_raw: Optional[str], conn=None) -> str:
+    """
+    Convert an incoming DEFAULT value into a Postgres-friendly fragment.
+
+    - Leaves CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIME as keywords.
+    - Keeps NOW() as a function call.
+    - Numeric strings are emitted as-is.
+    - Other strings are single-quoted (psycopg literal when possible; manual escape otherwise).
+    """
+    if not default_raw:
+        return ""
+
+    d = default_raw.strip()
+    up = d.upper()
+
+    # Keywords (no parentheses)
+    if up in {"CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"}:
+        return f" DEFAULT {up}"
+
+    # Functions that require parentheses
+    if up == "NOW()":
+        return " DEFAULT now()"
+
+    # Numeric?
+    try:
+        float(d)
+        return f" DEFAULT {d}"
+    except Exception:
+        pass
+
+    # String literal: prefer psycopg quoting if available & we have a connection
+    if psy_sql and conn is not None:
+        return " DEFAULT " + psy_sql.Literal(d).as_string(conn)
+
+    # Fallback: basic SQL single-quote escaping
+    quoted = "'" + d.replace("'", "''") + "'"
+    return f" DEFAULT {quoted}"
+
+
+
+def _infer_pg_type_from_value(v) -> str:
+    """Infer a reasonable Postgres type from a Python value (used for missing columns)."""
+    if v is None:
+        return "TEXT"
+    if isinstance(v, bool):
+        return "BOOLEAN"
+    if isinstance(v, int):
+        # choose BIGINT to be safe
+        return "BIGINT"
+    if isinstance(v, float):
+        return "DOUBLE PRECISION"
+    if isinstance(v, (datetime.date, datetime.datetime)):
+        return "TIMESTAMP"
+    # Try ISO date/time strings
+    if isinstance(v, str):
+        s = v.strip()
+        # crude ISO checks
+        try:
+            if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                datetime.date.fromisoformat(s)
+                return "DATE"
+            if " " in s or "T" in s:
+                # try timestamp
+                s2 = s.replace("T", " ")
+                datetime.datetime.fromisoformat(s2)
+                return "TIMESTAMP"
+        except Exception:
+            pass
+        # length-based varchar cap
+        if len(s) <= 255:
+            return "VARCHAR(255)"
+        return "TEXT"
+    # default
+    return "TEXT"
+
+
+#Helpers for data persistance
+
+
+def _build_column_sql_frag(col: dict) -> str:
+    """
+    Build a Postgres column definition from schema parser output:
+    col = {'name': 'id', 'type': 'INT', 'constraints': ['PRIMARY KEY', 'AUTO_INCREMENT', 'NOT NULL', 'DEFAULT ...']}
+    """
+    name = col['name']
+    col_type = _pg_type_from_schema(col.get('type', 'TEXT'))
+    constraints = col.get('constraints', [])
+    parts = [f'"{name}" {col_type}']
+
+    # AUTO_INCREMENT → identity (only if integer-like)
+    if any('AUTO_INCREMENT' in c.upper() for c in constraints):
+        if col_type in ("SMALLINT", "INTEGER", "BIGINT"):
+            parts = [f'"{name}" {col_type} GENERATED BY DEFAULT AS IDENTITY']
+        # else: ignore
+
+    # NOT NULL
+    if any('NOT NULL' in c.upper() for c in constraints):
+        parts.append("NOT NULL")
+
+    # UNIQUE
+    # if any(c.upper() == 'UNIQUE' for c in constraints):
+    #     parts.append("UNIQUE")
+
+    # DEFAULT
+    for c in constraints:
+        if c.upper().startswith("DEFAULT"):
+            # c like "DEFAULT xyz"
+            default_val = c.split(" ", 1)[1] if " " in c else None
+            parts.append(_default_sql_fragment(default_val))
+
+    # PRIMARY KEY (column-level)
+    if any('PRIMARY KEY' in c.upper() for c in constraints):
+        parts.append("PRIMARY KEY")
+
+    return " ".join(parts)
+
+
+def _create_table_if_missing(conn, table_name: str, table_schema: dict, sample_rows: list[dict]):
+    """
+    Create the table if not exists using parsed schema (columns & constraints).
+    If table exists, we don't touch it here—missing columns are handled separately.
+    """
+    columns = table_schema.get("columns", [])
+    column_frags = []
+
+    for col in columns:
+        column_frags.append(_build_column_sql_frag(col))
+
+    # If no columns were parsed (unlikely), infer from sample row keys
+    if not column_frags and sample_rows:
+        first = sample_rows[0]
+        for k, v in first.items():
+            inferred = _infer_pg_type_from_value(v)
+            column_frags.append(f'"{k}" {inferred}')
+
+    stmt = f'CREATE TABLE IF NOT EXISTS "{table_name}" (\n  ' + ",\n  ".join(column_frags) + "\n)"
+
+    with conn.cursor() as cur:
+        cur.execute(stmt)
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    q = """
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name = %s
+        LIMIT 1
+    """
+    with conn.cursor() as cur:
+        cur.execute(q, (table_name,))
+        return cur.fetchone() is not None
+
+
+def _get_existing_columns(conn, table_name: str) -> set[str]:
+    q = """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = %s
+    """
+    with conn.cursor() as cur:
+        cur.execute(q, (table_name,))
+        return {r[0] for r in cur.fetchall()}
+
+
+def _add_missing_columns(conn, table_name: str, rows: list[dict], known_schema_cols: dict[str, dict] | None):
+    """
+    Add columns that are present in data but not in the DB table.
+    Choose type by:
+      1) schema if available
+      2) infer from first non-null value in data
+    """
+    if not rows:
+        return
+
+    existing = _get_existing_columns(conn, table_name)
+    candidate_cols = set()
+    for r in rows:
+        candidate_cols.update(r.keys())
+
+    missing = [c for c in candidate_cols if c not in existing]
+    if not missing:
+        return
+
+    with conn.cursor() as cur:
+        for col in missing:
+            # Prefer schema type if present
+            pg_type = None
+            if known_schema_cols:
+                schema_col = known_schema_cols.get(col)
+                if schema_col:
+                    pg_type = _pg_type_from_schema(schema_col.get('type', 'TEXT'))
+
+            if not pg_type:
+                # infer from first non-null
+                v = None
+                for r in rows:
+                    if r.get(col) is not None:
+                        v = r[col]
+                        break
+                pg_type = _infer_pg_type_from_value(v)
+
+            alter = sql.SQL('ALTER TABLE {t} ADD COLUMN {c} {typ}').format(
+                t=sql.Identifier(table_name),
+                c=sql.Identifier(col),
+                typ=sql.SQL(pg_type)
+            )
+            cur.execute(alter.as_string(conn))
+
+
+
+
 
 # Configure Langfuse if available
 langfuse = None
@@ -560,6 +897,60 @@ data_generator = DataGenerator()
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/save_data', methods=['POST'])
+def save_data():
+    """Persist the current session's generated data into PostgreSQL (create tables/columns on demand)."""
+    try:
+        session_id = session.get('session_id')
+        if not session_id or session_id not in generated_data:
+            return jsonify({'success': False, 'error': 'No generated data found in session'}), 400
+
+        data = generated_data[session_id]['data'] or {}
+        if not data:
+            return jsonify({'success': False, 'error': 'Dataset is empty'}), 400
+
+        if pool is None:
+            return jsonify({'success': False, 'error': 'Database is not connected'}), 503
+
+        # Get parser schema (so we can map types)
+        schema_info = uploaded_schemas.get(session_id, {}).get('schema_info', {})
+
+        per_table_counts = {}
+        with get_conn() as conn:
+            conn.autocommit = False
+            try:
+                for table, rows in data.items():
+                    if not isinstance(rows, list) or not rows:
+                        per_table_counts[table] = 0
+                        continue
+
+                    # 1) Create table if missing (from schema; fall back to sample rows)
+                    table_schema = schema_info.get(table, {"columns": []})
+                    _create_table_if_missing(conn, table, table_schema, rows)
+
+                    # 2) Add missing columns (present in rows but absent in DB)
+                    # Build lookup of schema columns by name for this table
+                    schema_cols_by_name = {c['name']: c for c in table_schema.get('columns', [])}
+                    _add_missing_columns(conn, table, rows, schema_cols_by_name)
+
+                    # 3) Insert
+                    inserted = _bulk_insert_table(conn, table, rows)
+                    per_table_counts[table] = inserted
+
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                logger.exception("DB error when saving data")
+                return jsonify({'success': False, 'error': f'Database error: {e}'}), 500
+
+        logger.info(f"✅ Saved dataset to DB: {per_table_counts}")
+        return jsonify({'success': True, 'saved': per_table_counts})
+
+    except Exception as e:
+        logger.exception("Unexpected error in /save_data")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/session_status')
 def session_status():
