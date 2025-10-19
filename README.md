@@ -124,7 +124,7 @@ data-assistant/
 - Files are packaged as a ZIP archive with one CSV per table
 
 ### 5. Chat with Your Data
-- Switch to the "Talk to your data" tab
+- Switch to the "Query Data" tab
 - Ask questions about your generated dataset
 - Examples:
   - "What's the average age of customers?"

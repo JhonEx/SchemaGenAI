@@ -83,7 +83,7 @@ CREATE TABLE orders (
 1. **Upload Schema**: Upload the `sample_schema.sql` file
 2. **Generate Data**: Click "Generate" with default settings
 3. **Preview Data**: Select a table from the dropdown
-4. **Chat**: Switch to "Talk to your data" tab and ask: "How many customers do we have?"
+4. **Chat**: Switch to "Query Data" tab and ask: "How many customers do we have?"
 
 ## 📁 File Structure for Quick Start
 

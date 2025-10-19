@@ -11,13 +11,13 @@
     <div class="container">
         <!-- Sidebar -->
         <div class="sidebar">
-            <h2><i class="fas fa-database"></i> Data Assistant</h2>
+            <h2><i class="fas fa-robot"></i> Data Assistant</h2>
             <nav class="nav-tabs">
                 <button class="nav-tab active" data-tab="data-generation">
-                    <i class="fas fa-cogs"></i> Data Generation
+                    <i class="fas fa-gears"></i> Data Generation
                 </button>
                 <button class="nav-tab" data-tab="talk-to-data">
-                    <i class="fas fa-comments"></i> Talk to your data
+                    <i class="fas fa-messages"></i> Query Data
                 </button>
             </nav>
         </div>
@@ -28,34 +28,41 @@
             <div id="data-generation" class="tab-content active">
                 <div class="content-section">
                     <h3>Prompt</h3>
-                    <textarea id="prompt-text" placeholder="Enter your prompt here..." rows="4"></textarea>
+                    <textarea id="prompt-text" placeholder="Enter your prompt here, e.g., 'Generate realistic customer data with diverse demographics'" rows="4" aria-label="Data generation prompt"></textarea>
 
                     <div class="upload-section">
                         <label for="schema-upload" class="upload-btn">
-                            <i class="fas fa-upload"></i> Upload DDL Schema
+                            <i class="fas fa-file-arrow-up"></i> Upload DDL Schema
                         </label>
-                        <input type="file" id="schema-upload" accept=".sql,.json,.ddl" style="display: none;">
-                        <span class="file-info">Supported formats: SQL, JSON</span>
+                        <input type="file" id="schema-upload" accept=".sql,.json,.ddl" style="display: none;" aria-label="Upload schema file">
+                        <span class="file-info">Supported formats: SQL, JSON. Drag and drop files here.</span>
                         <div id="upload-status" class="upload-status"></div>
                     </div>
 
-                    <div class="advanced-params">
-                        <h4>Advanced Parameters</h4>
-                        <div class="param-row">
-                            <div class="param-group">
-                                <label for="temperature">Temperature</label>
-                                <input type="range" id="temperature" min="0" max="1" step="0.1" value="0.7">
-                                <span id="temp-value">0.7</span>
-                            </div>
-                            <div class="param-group">
-                                <label for="max-tokens">Max Tokens</label>
-                                <input type="number" id="max-tokens" value="100" min="10" max="10000">
+                    <div class="advanced-params collapsible">
+                        <button class="collapsible-btn" aria-expanded="false">
+                            <h4>Advanced Parameters</h4>
+                            <i class="fas fa-chevron-down"></i>
+                        </button>
+                        <div class="collapsible-content">
+                            <div class="param-row">
+                                <div class="param-group tooltip">
+                                    <label for="temperature">Temperature</label>
+                                    <input type="range" id="temperature" min="0" max="1" step="0.1" value="0.7" aria-label="Temperature control">
+                                    <span id="temp-value">0.7</span>
+                                    <span class="tooltiptext">Controls the randomness of generated data (0 = deterministic, 1 = very creative)</span>
+                                </div>
+                                <div class="param-group tooltip">
+                                    <label for="max-tokens">Number of Rows</label>
+                                    <input type="number" id="max-tokens" value="100" min="10" max="1000" aria-label="Number of rows to generate">
+                                    <span class="tooltiptext">Approximate number of rows to generate per table</span>
+                                </div>
                             </div>
                         </div>
                     </div>
 
                     <button id="generate-btn" class="generate-btn" disabled>
-                        <i class="fas fa-magic"></i> Generate
+                        <i class="fas fa-wand-magic-sparkles"></i> Generate
                     </button>
                 </div>
 
@@ -63,16 +70,16 @@
                 <div class="data-preview-section" id="data-preview" style="display: none;">
                     <div class="preview-header">
                         <h3>Data Preview</h3>
-                        <select id="table-selector">
+                        <select id="table-selector" aria-label="Select table to preview">
                             <option value="">Select a table...</option>
                         </select>
                         <button id="download-btn" class="download-btn">
-                            <i class="fas fa-download"></i> Download CSV/ZIP
+                            <i class="fas fa-file-arrow-down"></i> Download CSV/ZIP
                         </button>
 
                         <!-- Save to DB button (initially disabled until data is generated) -->
                         <button id="save-db-btn" class="download-btn" disabled>
-                          Save data to database
+                          <i class="fas fa-floppy-disk"></i> Save to Database
                         </button>
 
                         <!-- Status area (optional) -->
@@ -82,7 +89,7 @@
 
                     <div id="table-container">
                         <div class="table-wrapper">
-                            <table id="data-table">
+                            <table id="data-table" aria-label="Data preview table">
                                 <thead></thead>
                                 <tbody></tbody>
                             </table>
@@ -90,9 +97,9 @@
                     </div>
 
                     <div class="edit-section">
-                        <textarea id="edit-instructions" placeholder="Enter quick edit instructions..." rows="2"></textarea>
+                        <textarea id="edit-instructions" placeholder="Enter quick edit instructions, e.g., 'Make all ages between 18 and 65'" rows="2" aria-label="Edit instructions"></textarea>
                         <button id="submit-edit" class="submit-btn">
-                            <i class="fas fa-edit"></i> Submit
+                            <i class="fas fa-pen-to-square"></i> Submit
                         </button>
                     </div>
                 </div>
@@ -101,17 +108,17 @@
             <!-- Talk to Data Tab -->
             <div id="talk-to-data" class="tab-content">
                 <div class="chat-interface">
-                    <h3>Talk to Your Data</h3>
+                    <h3>Query Data</h3>
                     <div class="chat-messages" id="chat-messages">
                         <div class="system-message">
-                            <i class="fas fa-robot"></i>
+                            <i class="fas fa-headset"></i>
                             <p>Hello! I can help you analyze your generated data. Ask me questions about your datasets!</p>
                         </div>
                     </div>
                     <div class="chat-input-container">
-                        <input type="text" id="chat-input" placeholder="Ask a question about your data..." disabled>
-                        <button id="send-chat" disabled>
-                            <i class="fas fa-paper-plane"></i>
+                        <input type="text" id="chat-input" placeholder="Ask a question about your data, e.g., 'What is the average age in the customers table?'" disabled aria-label="Chat input">
+                        <button id="send-chat" disabled aria-label="Send message">
+                            <i class="fas fa-arrow-right"></i>
                         </button>
                     </div>
                     <div class="chat-status">
@@ -123,9 +130,9 @@
     </div>
 
     <!-- Loading Overlay -->
-    <div id="loading-overlay" class="loading-overlay" style="display: none;">
+    <div id="loading-overlay" class="loading-overlay" style="display: none;" aria-live="polite">
         <div class="loading-spinner">
-            <i class="fas fa-spinner fa-spin"></i>
+            <i class="fas fa-circle-notch fa-spin"></i>
             <p>Generating data...</p>
         </div>
     </div>
