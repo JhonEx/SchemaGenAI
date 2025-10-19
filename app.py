@@ -20,37 +20,9 @@ from psycopg2.extras import execute_values
 import os
 
 
-# Optional Langfuse import - will work without it
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-try:
-    from langfuse import Langfuse
-    from langfuse.decorators import observe, langfuse_context
-
-    LANGFUSE_AVAILABLE = True
-    print("✅ Langfuse loaded successfully")
-except ImportError:
-    print("⚠️ Langfuse not available - continuing without observability")
-    LANGFUSE_AVAILABLE = False
-
-
-    # Create dummy decorators if Langfuse is not available
-    def observe(name=None):
-        def decorator(func):
-            return func
-
-        return decorator
-
-
-    class DummyContext:
-        def update_current_trace(self, **kwargs):
-            pass
-
-
-    langfuse_context = DummyContext()
 
 app = Flask(__name__)
 # Load config from your Base/Dev/Prod (the class you shared)
@@ -369,19 +341,6 @@ def _add_missing_columns(conn, table_name: str, rows: list[dict], known_schema_c
             )
             cur.execute(alter.as_string(conn))
 
-langfuse = None
-if LANGFUSE_AVAILABLE:
-    try:
-        langfuse = Langfuse(
-            secret_key=os.getenv('LANGFUSE_SECRET_KEY'),
-            public_key=os.getenv('LANGFUSE_PUBLIC_KEY'),
-            host=os.getenv('LANGFUSE_HOST', 'http://localhost:3000')
-        )
-        logger.info("✅ Langfuse configured successfully")
-    except Exception as e:
-        logger.warning(f"⚠️ Langfuse configuration failed: {e}")
-        LANGFUSE_AVAILABLE = False
-
 generated_data = {}
 uploaded_schemas = {}
 chat_history = {}
@@ -619,16 +578,9 @@ class DataGenerator:
 
 
 
-    @observe(name="generate_synthetic_data")
     def generate_synthetic_data(self, schema_info: Dict, instructions: str = "", temperature: float = 0.7,
                                 num_rows: int = 3) -> Dict[str, List[Dict]]:
         try:
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    name="data_generation",
-                    input={"schema_info": schema_info, "instructions": instructions, "num_rows": num_rows}
-                )
-
             prompt = f"""
             Generate realistic synthetic data for the following database schema.
 
@@ -692,27 +644,16 @@ class DataGenerator:
 
             logger.error(f"❌ JSON parsing error: {last_err}")
             logger.error(f"Raw response (first 500 chars): {raw[:500]}...")
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(output={"error": f"JSON parsing error: {str(last_err)}"})
             return {}
 
         except Exception as e:
             logger.error(f"❌ Error generating data: {e}")
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(output={"error": str(e)})
             return {}
 
 
-    @observe(name="modify_table_data")
     def modify_data(self, table_name: str, data: List[Dict], instructions: str, temperature: float = 0.7) -> List[Dict]:
         """Modify existing data based on user instructions"""
         try:
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    name="data_modification",
-                    input={"table_name": table_name, "instructions": instructions, "original_rows": len(data)}
-                )
-
             prompt = f"""
             Modify the following data for table '{table_name}' based on the user instructions.
 
@@ -761,22 +702,11 @@ class DataGenerator:
 
         except Exception as e:
             logger.error(f"❌ Error modifying data: {e}")
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    output={"error": str(e)}
-                )
             return data
 
-    @observe(name="query_data_nl")
     def query_data_with_nl(self, query: str, data_context: Dict, schema_info: Dict) -> str:
         """Query data using natural language"""
         try:
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    name="natural_language_query",
-                    input={"query": query, "available_tables": list(data_context.keys())}
-                )
-
             data_summary = {}
             for table_name, table_data in data_context.items():
                 if table_data:
@@ -821,11 +751,6 @@ class DataGenerator:
             )
 
             answer = response.text.strip()
-
-            if LANGFUSE_AVAILABLE:
-                langfuse_context.update_current_trace(
-                    output={"response_length": len(answer)}
-                )
 
             logger.info(f"✅ Generated response for natural language query")
             return answer
@@ -1165,7 +1090,6 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'langfuse_available': LANGFUSE_AVAILABLE,
         'gemini_configured': bool(os.getenv('GOOGLE_API_KEY'))
     })
 
@@ -1181,7 +1105,6 @@ def internal_error(error):
 
 if __name__ == '__main__':
     print("🚀 Starting Data Assistant Application...")
-    print(f"   Langfuse: {'✅ Available' if LANGFUSE_AVAILABLE else '❌ Not available'}")
     print(f"   Gemini API: {'✅ Configured' if os.getenv('GOOGLE_API_KEY') else '❌ Not configured'}")
     print("   Server starting on http://localhost:5002")
     app.run(debug=True, host='0.0.0.0', port=5002, use_reloader=False)
